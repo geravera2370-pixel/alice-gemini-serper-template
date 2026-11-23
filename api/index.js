@@ -2,9 +2,9 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 4200;
-const SERPER_TIMEOUT_MS = 1300;
-const GEMINI_TIMEOUT_MS = 3500;
+const TOTAL_RESPONSE_BUDGET_MS = 3900;
+const SERPER_TIMEOUT_MS = 800;
+const GEMINI_TIMEOUT_MS = 3000;
 
 function getSystemPrompt() {
   const nowMoscow = new Intl.DateTimeFormat("ru-RU", {
