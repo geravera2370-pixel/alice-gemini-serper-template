@@ -2,17 +2,26 @@ const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 3600;
-const SERPER_TIMEOUT_MS = 600;
-const GEMINI_TIMEOUT_MS = 2500;
+const TOTAL_RESPONSE_BUDGET_MS = 4200;
+const SERPER_TIMEOUT_MS = 1300;
+const GEMINI_TIMEOUT_MS = 3500;
 
-const SYSTEM_PROMPT = [
-  "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
-  "Отвечай естественно, по-русски, кратко и так, чтобы ответ было удобно слушать.",
-  "Обычно используй 1–3 коротких предложения. Не используй Markdown, таблицы, списки с символами или длинные вступления.",
-  "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них; не выдумывай отсутствующие факты.",
-  "Если не знаешь ответа, честно скажи об этом."
-].join(" ");
+function getSystemPrompt() {
+  const nowMoscow = new Intl.DateTimeFormat("ru-RU", {
+    timeZone: "Europe/Moscow",
+    dateStyle: "full",
+    timeStyle: "short"
+  }).format(new Date());
+
+  return [
+    "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
+    `Текущая дата и время (Москва): ${nowMoscow}. Всегда опирайся на эту дату.`,
+    "Отвечай естественно, по-русски, кратко и так, чтобы ответ было удобно слушать.",
+    "Обычно используй 1–3 коротких предложения. Не используй Markdown, таблицы, списки с символами или длинные вступления.",
+    "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них; не выдумывай отсутствующие факты.",
+    "Если не знаешь ответа, честно скажи об этом."
+  ].join(" ");
+}
 
 function aliceResponse(text, endSession = false, history = []) {
   return {
@@ -46,7 +55,7 @@ function fitAliceText(value) {
 }
 
 function isSearchIntent(text) {
-  return /\b(latest|today|current|news|weather|price|exchange rate|recent|search|look up)\b|сегодня|сейчас|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит|свежие данные/i.test(text);
+  return /\b(latest|current|news|weather|price|exchange rate|recent|search|look up)\b|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит|свежие данные/i.test(text);
 }
 
 function safeHistory(history) {
@@ -71,7 +80,7 @@ async function fetchJson(url, options, timeoutMs) {
 
 async function searchWeb(query, timeoutMs) {
   const key = process.env.SERPER_API_KEY;
-  if (!key || timeoutMs < 150) return "";
+  if (!key || timeoutMs < 300) return "";
 
   try {
     const { response, data } = await fetchJson(
@@ -137,7 +146,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
         "x-goog-api-key": key
       },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        systemInstruction: { parts: [{ text: getSystemPrompt() }] },
         contents,
         generationConfig: {
           temperature: 0.5,
@@ -173,7 +182,8 @@ async function askGemini(text, history, searchContext, timeoutMs) {
 }
 
 function errorForUser(error) {
-  switch (error?.message) {
+  const code = typeof error === "string" ? error : error?.message;
+  switch (code) {
     case "MISSING_GEMINI_KEY":
       return "Сервер пока не настроен. Проверьте переменную GEMINI_API_KEY в настройках Vercel.";
     case "GEMINI_KEY_REJECTED":
@@ -221,15 +231,14 @@ export default async function handler(req, res) {
   try {
     let searchContext = "";
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
-      // Search has a very short budget because Alice expects a response within 4.5 seconds.
-      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2600)));
+      searchContext = await searchWeb(text, Math.min(SERPER_TIMEOUT_MS, Math.max(0, remainingMs() - 2500)));
     }
 
     const answer = await askGemini(
       text,
       oldHistory,
       searchContext,
-      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 600))
+      Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 200))
     );
 
     const history = [
@@ -240,8 +249,8 @@ export default async function handler(req, res) {
 
     return res.status(200).json(aliceResponse(answer, false, history));
   } catch (error) {
-    const safeError = error?.message === "AbortError" ? "TIME_BUDGET_EXHAUSTED" : error;
-    console.warn("Alice webhook returned a fallback response:", safeError?.message || "unknown error");
+    const safeError = error?.name === "AbortError" ? "TIME_BUDGET_EXHAUSTED" : error;
+    console.warn("Alice webhook returned a fallback response:", typeof safeError === "string" ? safeError : (safeError?.message || "unknown error"));
     return res.status(200).json(aliceResponse(errorForUser(safeError), false, oldHistory));
   }
 }
