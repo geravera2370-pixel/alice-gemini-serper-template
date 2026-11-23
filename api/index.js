@@ -3,7 +3,7 @@ const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
 const TOTAL_RESPONSE_BUDGET_MS = 3900;
-const SERPER_TIMEOUT_MS = 800;
+const SERPER_TIMEOUT_MS = 850;
 const GEMINI_TIMEOUT_MS = 3000;
 
 function getSystemPrompt() {
@@ -18,8 +18,7 @@ function getSystemPrompt() {
     `Текущая дата и время (Москва): ${nowMoscow}. Всегда опирайся на эту дату.`,
     "Отвечай естественно, по-русски, кратко и так, чтобы ответ было удобно слушать.",
     "Обычно используй 1–3 коротких предложения. Не используй Markdown, таблицы, списки с символами или длинные вступления.",
-    "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них; не выдумывай отсутствующие факты.",
-    "Если не знаешь ответа, честно скажи об этом."
+    "Если переданы результаты поиска, используй их для актуального ответа. Если результатов нет или данных не хватает, отвечай из своих знаний, но не выдумывай факты."
   ].join(" ");
 }
 
@@ -54,8 +53,27 @@ function fitAliceText(value) {
   return (lastSpace > 200 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
 }
 
+// Универсальная проверка: ищем по умолчанию, кроме приветствий, даты/времени и творческих задач
 function isSearchIntent(text) {
-  return /\b(latest|current|news|weather|price|exchange rate|recent|search|look up)\b|последн|новост|погод|курс валют|найди|поищи|актуальн|сколько стоит|свежие данные/i.test(text);
+  const clean = text.trim().toLowerCase();
+  if (clean.length < 6) return false;
+
+  // Приветствия и короткие бытовые реплики
+  if (/^(привет|здравствуй|добрый день|доброе утро|добрый вечер|хай|спасибо|пока|хватит|выйти|стоп|да|нет|ок|окей|понятно|хорошо)[.!?]*$/i.test(clean)) {
+    return false;
+  }
+
+  // Вопросы только про текущую дату/время (они уже есть в системном промпте)
+  if (/^(какой сегодня день|какое сегодня число|сколько времени|который час|какой день недели)[?.\s]*$/i.test(clean)) {
+    return false;
+  }
+
+  // Творческие и текстовые задачи, где поиск только мешает
+  if (/^(придумай|сочини|напиши стих|напиши текст|расскажи сказку|расскажи анекдот|пошути|переведи|перефразируй)/i.test(clean)) {
+    return false;
+  }
+
+  return true;
 }
 
 function safeHistory(history) {
@@ -91,7 +109,7 @@ async function searchWeb(query, timeoutMs) {
           "X-API-KEY": key,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ q: query, gl: "ru", hl: "ru", num: 3 })
+        body: JSON.stringify({ q: query, gl: "ru", hl: "ru", num: 2 })
       },
       Math.min(SERPER_TIMEOUT_MS, timeoutMs)
     );
@@ -102,16 +120,15 @@ async function searchWeb(query, timeoutMs) {
     }
 
     const items = (Array.isArray(data.organic) ? data.organic : [])
-      .slice(0, 3)
+      .slice(0, 2)
       .map((item, i) => {
-        const title = String(item.title || "").slice(0, 180);
-        const snippet = String(item.snippet || "").slice(0, 350);
-        const link = String(item.link || "").slice(0, 240);
-        return `${i + 1}. ${title}: ${snippet} ${link}`.trim();
+        const title = String(item.title || "").slice(0, 120);
+        const snippet = String(item.snippet || "").slice(0, 200);
+        return `${i + 1}. ${title}: ${snippet}`.trim();
       });
 
     const answerBox = data.answerBox?.answer || data.answerBox?.snippet;
-    if (answerBox) items.unshift(`Краткий ответ поисковика: ${String(answerBox).slice(0, 350)}`);
+    if (answerBox) items.unshift(`Краткий ответ: ${String(answerBox).slice(0, 250)}`);
     return items.length ? items.join("\n") : "";
   } catch (error) {
     console.warn("Serper request did not finish in time; continuing without search.");
@@ -133,7 +150,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
   }));
 
   const prompt = searchContext
-    ? `${text}\n\nРезультаты поиска в интернете:\n${searchContext}\nИспользуй их только там, где они относятся к вопросу.`
+    ? `${text}\n\nРезультаты поиска в интернете:\n${searchContext}\nИспользуй их, если они помогают ответить на вопрос.`
     : text;
   contents.push({ role: "user", parts: [{ text: prompt }] });
 
@@ -150,7 +167,7 @@ async function askGemini(text, history, searchContext, timeoutMs) {
         contents,
         generationConfig: {
           temperature: 0.5,
-          maxOutputTokens: 240
+          maxOutputTokens: 160
         }
       })
     },
@@ -174,9 +191,6 @@ async function askGemini(text, history, searchContext, timeoutMs) {
   if (!answer) {
     if (data?.promptFeedback?.blockReason) throw new Error("GEMINI_BLOCKED");
     throw new Error("GEMINI_EMPTY_RESPONSE");
-  }
-  if (candidate?.finishReason === "MAX_TOKENS") {
-    console.warn("Gemini reached the output token limit.");
   }
   return answer;
 }
@@ -240,6 +254,8 @@ export default async function handler(req, res) {
       searchContext,
       Math.max(0, Math.min(GEMINI_TIMEOUT_MS, remainingMs() - 200))
     );
+
+    console.log("TIMING_MS:", { total: Date.now() - startedAt, hasSearch: Boolean(searchContext) });
 
     const history = [
       ...oldHistory,
